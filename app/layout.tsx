@@ -5,7 +5,7 @@ import { shadcn } from "@clerk/ui/themes";
 
 import Navbar from "@/components/Navbar";
 import "./globals.css";
-import { Toaster } from "sonner";
+import { Toaster } from "@/components/ui/sonner";
 
 const ibmPlexSerif = IBM_Plex_Serif({
   variable: "--font-ibm-plex-serif",

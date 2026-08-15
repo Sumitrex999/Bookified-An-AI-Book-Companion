@@ -11,11 +11,12 @@ import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '
 import { Input } from '@/components/ui/input'
 import { voiceCategories, voiceOptions } from '@/lib/constants'
 import { UploadSchema } from '@/lib/zod'
-import { cn, parsePDFFile } from '@/lib/utils'
+import { cn, generateSlug, parsePDFFile } from '@/lib/utils'
 import { useAuth } from '@clerk/nextjs';
 import { toast } from 'sonner';
 import { useRouter } from 'next/navigation';
 import { checkBookExists, createBook, saveBookSegments } from '@/lib/actions/book.actions';
+import { deleteUploadedBlobs } from '@/lib/actions/blob.actions';
 import { upload } from '@vercel/blob/client';
 
 
@@ -109,7 +110,7 @@ function FileDropzone({
 
 const UploadForm = () => {
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const { userId } = useAuth();
+  const { isLoaded, userId } = useAuth();
   const router = useRouter();
 
   const form = useForm<UploadValues>({
@@ -124,11 +125,39 @@ const UploadForm = () => {
   })
 
   const onSubmit = async (data: UploadValues) => {
+    if (!isLoaded) {
+      return;
+    }
+
     if(!userId) {
 
       return toast.error('You must be logged in to upload a book.');
     }
     setIsSubmitting(true);
+    let uploadedPdfPathname: string | undefined;
+    let uploadedCoverPathname: string | undefined;
+    let cleanupAttempted = false;
+
+    const cleanupUploadedBlobs = async () => {
+      if (cleanupAttempted) {
+        return;
+      }
+
+      cleanupAttempted = true;
+      const pathnames = [uploadedPdfPathname, uploadedCoverPathname].filter(
+        (pathname): pathname is string => Boolean(pathname),
+      );
+
+      if (pathnames.length === 0) {
+        return;
+      }
+
+      try {
+        await deleteUploadedBlobs(pathnames);
+      } catch (cleanupError) {
+        console.error('Failed to clean up uploaded blobs:', cleanupError);
+      }
+    };
 
     // PostHog -> Track Book Uploads ...
     try {
@@ -140,7 +169,8 @@ const UploadForm = () => {
         return;
       }
 
-      const fileTitle = data.title.replace(/\s+/g, '-').toLowerCase();
+      const fileTitle = generateSlug(data.title);
+      const uploadPath = `books/${userId}/${fileTitle}`;
       const pdfFile = data.pdfFile;
 
       const parsedPDF = await parsePDFFile(pdfFile);
@@ -150,36 +180,38 @@ const UploadForm = () => {
         return;
       }
 
-      const uploadedPdfBlob = await upload(`${fileTitle}.pdf`, pdfFile, {
+      const uploadedPdfBlob = await upload(`${uploadPath}.pdf`, pdfFile, {
         access: 'public',
         handleUploadUrl: '/api/upload',
         contentType: 'application/pdf',
       });
+      uploadedPdfPathname = uploadedPdfBlob.pathname;
 
       let coverUrl: string;
 
       if (data.coverImage) {
         const coverFile = data.coverImage;
-        const uploadedCoverBlob = await upload(`${fileTitle}_cover.png`, coverFile, {
+        const uploadedCoverBlob = await upload(`${uploadPath}_cover.png`, coverFile, {
           access: 'public',
           handleUploadUrl: '/api/upload',
           contentType: coverFile.type,
         });
+        uploadedCoverPathname = uploadedCoverBlob.pathname;
         coverUrl = uploadedCoverBlob.url;
       } else {
         const response = await fetch(parsedPDF.cover);
         const blob = await response.blob();
 
-        const uploadedCoverBlob = await upload(`${fileTitle}_cover.png`, blob, {
+        const uploadedCoverBlob = await upload(`${uploadPath}_cover.png`, blob, {
           access: 'public',
           handleUploadUrl: '/api/upload',
           contentType: 'image/png',
         });
+        uploadedCoverPathname = uploadedCoverBlob.pathname;
         coverUrl = uploadedCoverBlob.url;
       }
 
       const book = await createBook({
-        clerkId: userId,
         title: data.title,
         author: data.author,
         persona: data.persona,
@@ -190,26 +222,31 @@ const UploadForm = () => {
       });
 
       if (!book.success) {
+        await cleanupUploadedBlobs();
         toast.error('Failed to create the book. Please try again.');
         return;
       }
 
       if (book.alreadyExists) {
+        await cleanupUploadedBlobs();
         toast.info('A book with this title already exists.');
         form.reset();
         router.push(`/books/${book.data.slug}`);
         return;
       }
 
-      const segments = await saveBookSegments(book.data._id, userId, parsedPDF.content);
+      const segments = await saveBookSegments(book.data._id, parsedPDF.content);
 
       if (!segments?.success) {
+        await cleanupUploadedBlobs();
         throw new Error('Failed to save book segments');
       }
 
       form.reset();
       router.push(`/books/${book.data.slug}`);
     } catch (error) {
+
+      await cleanupUploadedBlobs();
 
       console.error(error);
       toast.error('Failed to upload book. Please try again later.');
@@ -227,7 +264,7 @@ const UploadForm = () => {
           <FormField control={form.control} name="pdfFile" render={({ field }) => (
             <FormItem>
               <FormLabel className="form-label">Book PDF File</FormLabel>
-              <FormControl><FileDropzone file={field.value} onChange={field.onChange} onRemove={() => field.onChange(undefined)} accept="application/pdf" icon={Upload} text="Click to upload PDF" hint="PDF file (max 50MB)" disabled={isSubmitting} /></FormControl>
+              <FormControl><FileDropzone file={field.value} onChange={field.onChange} onRemove={() => field.onChange(undefined)} accept="application/pdf" icon={Upload} text="Click to upload PDF" hint="PDF file (max 50MB)" disabled={isSubmitting || !isLoaded} /></FormControl>
               <FormMessage />
             </FormItem>
           )} />
@@ -235,17 +272,17 @@ const UploadForm = () => {
           <FormField control={form.control} name="coverImage" render={({ field }) => (
             <FormItem>
               <FormLabel className="form-label">Cover Image <span className="font-normal">(Optional)</span></FormLabel>
-              <FormControl><FileDropzone file={field.value} onChange={field.onChange} onRemove={() => field.onChange(undefined)} accept="image/jpeg,image/png,image/webp" icon={ImageIcon} text="Click to upload cover image" hint="Leave empty to auto-generate from PDF" disabled={isSubmitting} /></FormControl>
+              <FormControl><FileDropzone file={field.value} onChange={field.onChange} onRemove={() => field.onChange(undefined)} accept="image/jpeg,image/png,image/webp" icon={ImageIcon} text="Click to upload cover image" hint="Leave empty to auto-generate from PDF" disabled={isSubmitting || !isLoaded} /></FormControl>
               <FormMessage />
             </FormItem>
           )} />
 
           <FormField control={form.control} name="title" render={({ field }) => (
-            <FormItem><FormLabel className="form-label">Title</FormLabel><FormControl><Input className="form-input h-auto border-0 shadow-[var(--shadow-soft-sm)]" placeholder="ex: Rich Dad Poor Dad" disabled={isSubmitting} {...field} /></FormControl><FormMessage /></FormItem>
+            <FormItem><FormLabel className="form-label">Title</FormLabel><FormControl><Input className="form-input h-auto border-0 shadow-[var(--shadow-soft-sm)]" placeholder="ex: Rich Dad Poor Dad" disabled={isSubmitting || !isLoaded} {...field} /></FormControl><FormMessage /></FormItem>
           )} />
 
           <FormField control={form.control} name="author" render={({ field }) => (
-            <FormItem><FormLabel className="form-label">Author Name</FormLabel><FormControl><Input className="form-input h-auto border-0 shadow-[var(--shadow-soft-sm)]" placeholder="ex: Robert Kiyosaki" disabled={isSubmitting} {...field} /></FormControl><FormMessage /></FormItem>
+            <FormItem><FormLabel className="form-label">Author Name</FormLabel><FormControl><Input className="form-input h-auto border-0 shadow-[var(--shadow-soft-sm)]" placeholder="ex: Robert Kiyosaki" disabled={isSubmitting || !isLoaded} {...field} /></FormControl><FormMessage /></FormItem>
           )} />
 
           <FormField control={form.control} name="persona" render={({ field }) => (
@@ -260,7 +297,7 @@ const UploadForm = () => {
                       const selected = field.value === voiceKey
                       return (
                         <label key={voiceKey} className={cn('voice-selector-option justify-start', selected ? 'voice-selector-option-selected' : 'voice-selector-option-default')}>
-                          <input type="radio" className="size-4 accent-[#663820]" value={voiceKey} checked={selected} onChange={() => field.onChange(voiceKey)} disabled={isSubmitting} />
+                          <input type="radio" className="size-4 accent-[#663820]" value={voiceKey} checked={selected} onChange={() => field.onChange(voiceKey)} disabled={isSubmitting || !isLoaded} />
                           <span><span className="block font-semibold text-[#333]">{voice.name}</span><span className="mt-1 block text-xs leading-4 text-[#666]">{voice.description}</span></span>
                         </label>
                       )
@@ -272,7 +309,7 @@ const UploadForm = () => {
             </FormItem>
           )} />
 
-          <button type="submit" className="form-btn" disabled={isSubmitting}>Begin Synthesis</button>
+          <button type="submit" className="form-btn" disabled={isSubmitting || !isLoaded}>Begin Synthesis</button>
         </form>
       </Form>
     </>

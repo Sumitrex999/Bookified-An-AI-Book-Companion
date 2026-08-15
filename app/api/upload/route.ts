@@ -30,6 +30,10 @@ export async function POST(request: Request) {
       body,
       request,
       onBeforeGenerateToken: async (pathname) => {
+        if (!pathname.startsWith(`books/${userId}/`)) {
+          throw new Error('Invalid upload pathname');
+        }
+
         const isCover = pathname.endsWith('_cover.png');
 
         return {
