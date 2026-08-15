@@ -44,11 +44,15 @@ export async function POST(request: Request) {
         };
       },
       onUploadCompleted: async ({ blob, tokenPayload }) => {
-        const payload = tokenPayload ? JSON.parse(tokenPayload) : null;
-        console.info('Blob upload completed', {
-          pathname: blob.pathname,
-          userId: payload?.userId,
-        });
+        let hasOwner = false;
+
+        try {
+          hasOwner = Boolean(tokenPayload && JSON.parse(tokenPayload)?.userId);
+        } catch {
+          console.warn('Blob upload completed with an unparsable token payload');
+        }
+
+        console.info('Blob upload completed', { pathname: blob.pathname, hasOwner });
       },
     });
 
