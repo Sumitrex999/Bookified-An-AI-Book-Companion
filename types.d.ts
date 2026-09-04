@@ -56,6 +56,7 @@ export interface IVoiceSession extends Document {
 export type BookUploadFormValues = z.infer<typeof UploadSchema>;
 
 export interface CreateBook {
+    clerkId: string;
     title: string;
     author: string;
     persona?: string;
@@ -114,4 +115,27 @@ export interface FileUploadFieldProps<T extends FieldValues> {
     icon: LucideIcon;
     placeholder: string;
     hint: string;
+}
+import {PLANS, PlanType} from "@/lib/subscription-constants";
+
+export interface SessionCheckResult {
+    allowed: boolean;
+    currentCount: number;
+    limit: number;
+    plan: PlanType;
+    maxDurationMinutes: number;
+    error?: string;
+}
+
+export interface StartSessionResult {
+    success: boolean;
+    sessionId?: string;
+    maxDurationMinutes?: number;
+    error?: string;
+    isBillingError?: boolean;
+}
+
+export interface EndSessionResult {
+    success: boolean;
+    error?: string;
 }
